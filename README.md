@@ -64,9 +64,13 @@ cd xianyu-autoagent
 pip install -r requirements.txt
 
 3. 配置环境变量
-创建一个 `.env` 文件，包含以下内容：
+创建一个 `.env` 文件，包含以下内容，也可直接重命名 `.env.example` ：
+
 OPENAI_API_KEY=your_api_key_here
 COOKIES_STR=your_cookies_here
+
+注意：代码中OPENAI_API_KEY默认使用的是通义千问，如需使用其他API，请自行修改代码中的模型地址和模型名称；
+COOKIES_STR自行在闲鱼网页端获取cookies
 
 4. 创建提示词文件prompts/*_prompt.txt
 默认提供四个模板，可自行修改
@@ -107,6 +111,12 @@ python main.py
 https://github.com/cv-cat/XianYuApis
 
 感谢<a href="https://github.com/cv-cat">@CVcat</a>的技术支持
+
+## 📱 交流群
+欢迎加入项目交流群，交流技术、分享经验、互助学习。
+<div align="center">
+  <img src="./images/wx_group.png" width="400px" alt="交流群">
+</div>
 
 ## 💼 寻找机会
 
