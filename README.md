@@ -66,13 +66,16 @@ pip install -r requirements.txt
 3. 配置环境变量
 创建一个 `.env` 文件，包含以下内容，也可直接重命名 `.env.example` ：
 
-OPENAI_API_KEY=your_api_key_here
-COOKIES_STR=your_cookies_here
+API_KEY=apikey通过模型平台获取
+COOKIES_STR=填写网页端获取的cookie
+MODEL_BASE_URL=模型地址
+MODEL_NAME=模型名称
 
-注意：代码中OPENAI_API_KEY默认使用的是通义千问，如需使用其他API，请自行修改代码中的模型地址和模型名称；
+
+注意：默认使用的模型是通义千问，如需使用其他API，请自行修改.env文件中的模型地址和模型名称；
 COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，选择Network，点击Fetch/XHR,点击一个请求，查看cookies)
 
-4. 创建提示词文件prompts/*_prompt.txt
+4. 创建提示词文件prompts/*_prompt.txt（也可以直接将模板名称中的_example去掉）
 默认提供四个模板，可自行修改
 ```
 

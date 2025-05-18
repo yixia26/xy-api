@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 from datetime import datetime
 from loguru import logger
 
@@ -63,6 +64,17 @@ class ChatContextManager:
             count INTEGER DEFAULT 0,
             last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, item_id)
+        )
+        ''')
+        
+        # 创建商品信息表
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS items (
+            item_id TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            price REAL,
+            description TEXT,
+            last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         ''')
         
@@ -387,4 +399,101 @@ class ChatContextManager:
             return backup_path
         except Exception as e:
             logger.error(f"备份数据库时出错: {e}")
-            return None 
+            return None
+            
+    def save_item_info(self, item_id, item_data):
+        """
+        保存商品信息到数据库
+        
+        Args:
+            item_id: 商品ID
+            item_data: 商品信息字典
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # 从商品数据中提取有用信息
+            price = float(item_data.get('soldPrice', 0))
+            description = item_data.get('desc', '')
+            
+            # 将整个商品数据转换为JSON字符串
+            data_json = json.dumps(item_data, ensure_ascii=False)
+            
+            cursor.execute(
+                """
+                INSERT INTO items (item_id, data, price, description, last_updated) 
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(item_id) 
+                DO UPDATE SET data = ?, price = ?, description = ?, last_updated = ?
+                """,
+                (
+                    item_id, data_json, price, description, datetime.now().isoformat(),
+                    data_json, price, description, datetime.now().isoformat()
+                )
+            )
+            
+            conn.commit()
+            logger.debug(f"商品信息已保存: {item_id}")
+        except Exception as e:
+            logger.error(f"保存商品信息时出错: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+    
+    def get_item_info(self, item_id):
+        """
+        从数据库获取商品信息
+        
+        Args:
+            item_id: 商品ID
+            
+        Returns:
+            dict: 商品信息字典，如果不存在返回None
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "SELECT data FROM items WHERE item_id = ?",
+                (item_id,)
+            )
+            
+            result = cursor.fetchone()
+            if result:
+                return json.loads(result[0])
+            return None
+        except Exception as e:
+            logger.error(f"获取商品信息时出错: {e}")
+            return None
+        finally:
+            conn.close()
+            
+    def clear_old_items(self, days_to_keep=90):
+        """
+        清理指定天数前未更新的商品信息
+        
+        Args:
+            days_to_keep: 保留多少天的商品信息
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                """
+                DELETE FROM items 
+                WHERE last_updated < datetime('now', '-' || ? || ' days')
+                """, 
+                (days_to_keep,)
+            )
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            logger.info(f"已清理 {deleted_count} 条过期商品信息")
+        except Exception as e:
+            logger.error(f"清理商品信息时出错: {e}")
+            conn.rollback()
+        finally:
+            conn.close() 

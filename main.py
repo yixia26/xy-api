@@ -20,6 +20,7 @@ class XianyuLive:
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
         self.cookies_str = cookies_str
         self.cookies = trans_cookies(cookies_str)
+        self.xianyu.session.cookies.update(self.cookies)  # 直接使用 session.cookies.update
         self.myid = self.cookies['unb']
         self.device_id = generate_device_id(self.myid)
         self.context_manager = ChatContextManager()
@@ -79,7 +80,7 @@ class XianyuLive:
         await ws.send(json.dumps(msg))
 
     async def init(self, ws):
-        token = self.xianyu.get_token(self.cookies, self.device_id)['data']['accessToken']
+        token = self.xianyu.get_token(self.device_id)['data']['accessToken']
         msg = {
             "lwp": "/reg",
             "headers": {
@@ -248,10 +249,23 @@ class XianyuLive:
             if not item_id:
                 logger.warning("无法获取商品ID")
                 return
-                
-            item_info = self.xianyu.get_item_info(self.cookies, item_id)['data']['itemDO']
-            item_description = f"{item_info['desc']};当前商品售卖价格为:{str(item_info['soldPrice'])}"
             
+            # 从数据库中获取商品信息，如果不存在则从API获取并保存
+            item_info = self.context_manager.get_item_info(item_id)
+            if not item_info:
+                logger.info(f"从API获取商品信息: {item_id}")
+                api_result = self.xianyu.get_item_info(item_id)
+                if 'data' in api_result and 'itemDO' in api_result['data']:
+                    item_info = api_result['data']['itemDO']
+                    # 保存商品信息到数据库
+                    self.context_manager.save_item_info(item_id, item_info)
+                else:
+                    logger.warning(f"获取商品信息失败: {api_result}")
+                    return
+            else:
+                logger.info(f"从数据库获取商品信息: {item_id}")
+                
+            item_description = f"{item_info['desc']};当前商品售卖价格为:{str(item_info['soldPrice'])}"
             logger.info(f"user: {send_user_name}, 发送消息: {send_message}")
             
             # 添加用户消息到上下文
