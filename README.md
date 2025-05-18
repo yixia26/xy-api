@@ -70,7 +70,7 @@ OPENAI_API_KEY=your_api_key_here
 COOKIES_STR=your_cookies_here
 
 注意：代码中OPENAI_API_KEY默认使用的是通义千问，如需使用其他API，请自行修改代码中的模型地址和模型名称；
-COOKIES_STR自行在闲鱼网页端获取cookies
+COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，选择Network，点击Fetch/XHR,点击一个请求，查看cookies)
 
 4. 创建提示词文件prompts/*_prompt.txt
 默认提供四个模板，可自行修改
@@ -115,7 +115,16 @@ https://github.com/cv-cat/XianYuApis
 ## 📱 交流群
 欢迎加入项目交流群，交流技术、分享经验、互助学习。
 <div align="center">
-  <img src="./images/wx_group.png" width="400px" alt="交流群">
+  <table>
+    <tr>
+      <td align="center"><strong>交流群1（已满200）</strong></td>
+      <td align="center"><strong>交流群2（推荐加入）</strong></td>
+    </tr>
+    <tr>
+      <td><img src="./images/wx_group.png" width="300px" alt="交流群1"></td>
+      <td><img src="./images/wx_group2.jpg" width="300px" alt="交流群2"></td>
+    </tr>
+  </table>
 </div>
 
 ## 💼 寻找机会
