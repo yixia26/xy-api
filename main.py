@@ -32,6 +32,15 @@ class XianyuLive:
         self.last_heartbeat_response = 0
         self.heartbeat_task = None
         self.ws = None
+        
+        # 人工接管相关配置
+        self.manual_mode_conversations = set()  # 存储处于人工接管模式的会话ID
+        self.manual_mode_timeout = 3600  # 人工接管超时时间（1小时）
+        self.manual_mode_timestamps = {}  # 记录进入人工模式的时间
+        
+        # 人工接管关键词，从环境变量读取
+        self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
+        logger.info(f"人工接管切换关键词为: {self.toggle_keywords}")
 
     async def send_msg(self, ws, cid, toid, text):
         text = {
@@ -147,6 +156,59 @@ class XianyuLive:
         except Exception:
             return False
 
+    def is_system_message(self, message):
+        """判断是否为系统消息"""
+        try:
+            return (
+                isinstance(message, dict)
+                and "3" in message
+                and isinstance(message["3"], dict)
+                and "needPush" in message["3"]
+                and message["3"]["needPush"] == "false"
+            )
+        except Exception:
+            return False
+
+    def check_toggle_keywords(self, message):
+        """检查消息是否包含切换关键词"""
+        message_stripped = message.strip()
+        return message_stripped in self.toggle_keywords
+
+    def is_manual_mode(self, chat_id):
+        """检查特定会话是否处于人工接管模式"""
+        if chat_id not in self.manual_mode_conversations:
+            return False
+        
+        # 检查是否超时
+        current_time = time.time()
+        if chat_id in self.manual_mode_timestamps:
+            if current_time - self.manual_mode_timestamps[chat_id] > self.manual_mode_timeout:
+                # 超时，自动退出人工模式
+                self.exit_manual_mode(chat_id)
+                return False
+        
+        return True
+
+    def enter_manual_mode(self, chat_id):
+        """进入人工接管模式"""
+        self.manual_mode_conversations.add(chat_id)
+        self.manual_mode_timestamps[chat_id] = time.time()
+
+    def exit_manual_mode(self, chat_id):
+        """退出人工接管模式"""
+        self.manual_mode_conversations.discard(chat_id)
+        if chat_id in self.manual_mode_timestamps:
+            del self.manual_mode_timestamps[chat_id]
+
+    def toggle_manual_mode(self, chat_id):
+        """切换人工接管模式"""
+        if self.is_manual_mode(chat_id):
+            self.exit_manual_mode(chat_id)
+            return "auto"
+        else:
+            self.enter_manual_mode(chat_id)
+            return "manual"
+
     async def handle_message(self, message_data, websocket):
         """处理所有类型的消息"""
         try:
@@ -239,17 +301,44 @@ class XianyuLive:
                 logger.debug("过期消息丢弃")
                 return
                 
-            if send_user_id == self.myid:
-                logger.debug("过滤自身消息")
-                return
-                
+            # 获取商品ID和会话ID
             url_info = message["1"]["10"]["reminderUrl"]
             item_id = url_info.split("itemId=")[1].split("&")[0] if "itemId=" in url_info else None
+            chat_id = message["1"]["2"].split('@')[0]
             
             if not item_id:
                 logger.warning("无法获取商品ID")
                 return
+
+            # 检查是否为卖家（自己）发送的控制命令
+            if send_user_id == self.myid:
+                logger.debug("检测到卖家消息，检查是否为控制命令")
+                
+                # 检查切换命令
+                if self.check_toggle_keywords(send_message):
+                    mode = self.toggle_manual_mode(chat_id)
+                    if mode == "manual":
+                        logger.info(f"🔴 已接管会话 {chat_id} (商品: {item_id})")
+                    else:
+                        logger.info(f"🟢 已恢复会话 {chat_id} 的自动回复 (商品: {item_id})")
+                    return
+                
+                # 记录卖家人工回复
+                self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", send_message)
+                logger.info(f"卖家人工回复 (会话: {chat_id}, 商品: {item_id}): {send_message}")
+                return
             
+            logger.info(f"用户: {send_user_name} (ID: {send_user_id}), 商品: {item_id}, 会话: {chat_id}, 消息: {send_message}")
+            # 添加用户消息到上下文
+            self.context_manager.add_message_by_chat(chat_id, send_user_id, item_id, "user", send_message)
+            
+            # 如果当前会话处于人工接管模式，不进行自动回复
+            if self.is_manual_mode(chat_id):
+                logger.info(f"🔴 会话 {chat_id} 处于人工接管模式，跳过自动回复")
+                return
+            if self.is_system_message(message):
+                logger.debug("系统消息，跳过处理")
+                return
             # 从数据库中获取商品信息，如果不存在则从API获取并保存
             item_info = self.context_manager.get_item_info(item_id)
             if not item_info:
@@ -266,14 +355,9 @@ class XianyuLive:
                 logger.info(f"从数据库获取商品信息: {item_id}")
                 
             item_description = f"{item_info['desc']};当前商品售卖价格为:{str(item_info['soldPrice'])}"
-            logger.info(f"user: {send_user_name}, 发送消息: {send_message}")
-            
-            # 添加用户消息到上下文
-            self.context_manager.add_message(send_user_id, item_id, "user", send_message)
             
             # 获取完整的对话上下文
-            context = self.context_manager.get_context(send_user_id, item_id)
-            
+            context = self.context_manager.get_context_by_chat(chat_id)
             # 生成回复
             bot_reply = bot.generate_reply(
                 send_message,
@@ -283,16 +367,15 @@ class XianyuLive:
             
             # 检查是否为价格意图，如果是则增加议价次数
             if bot.last_intent == "price":
-                self.context_manager.increment_bargain_count(send_user_id, item_id)
-                bargain_count = self.context_manager.get_bargain_count(send_user_id, item_id)
+                self.context_manager.increment_bargain_count_by_chat(chat_id)
+                bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
                 logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
             
             # 添加机器人回复到上下文
-            self.context_manager.add_message(send_user_id, item_id, "assistant", bot_reply)
+            self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", bot_reply)
             
             logger.info(f"机器人回复: {bot_reply}")
-            cid = message["1"]["2"].split('@')[0]
-            await self.send_msg(websocket, cid, send_user_id, bot_reply)
+            await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
             
         except Exception as e:
             logger.error(f"处理消息时发生错误: {str(e)}")
