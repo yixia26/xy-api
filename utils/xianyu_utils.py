@@ -1,11 +1,9 @@
 import json
 import time
 import hashlib
-import uuid
 import base64
 import struct
-from typing import Any, Dict, List, Union
-import msgpack
+from typing import Any, Dict, List
 
 
 def trans_cookies(cookies_str: str) -> Dict[str, str]:
@@ -72,7 +70,7 @@ def generate_sign(t: str, token: str, data: str) -> str:
 
 
 class MessagePackDecoder:
-    """MessagePack解码器的简化实现"""
+    """MessagePack解码器的纯Python实现"""
     
     def __init__(self, data: bytes):
         self.data = data
@@ -93,22 +91,196 @@ class MessagePackDecoder:
         self.pos += count
         return result
     
+    def read_uint8(self) -> int:
+        return self.read_byte()
+    
     def read_uint16(self) -> int:
         return struct.unpack('>H', self.read_bytes(2))[0]
     
     def read_uint32(self) -> int:
         return struct.unpack('>I', self.read_bytes(4))[0]
     
+    def read_uint64(self) -> int:
+        return struct.unpack('>Q', self.read_bytes(8))[0]
+    
+    def read_int8(self) -> int:
+        return struct.unpack('>b', self.read_bytes(1))[0]
+    
+    def read_int16(self) -> int:
+        return struct.unpack('>h', self.read_bytes(2))[0]
+    
+    def read_int32(self) -> int:
+        return struct.unpack('>i', self.read_bytes(4))[0]
+    
+    def read_int64(self) -> int:
+        return struct.unpack('>q', self.read_bytes(8))[0]
+    
+    def read_float32(self) -> float:
+        return struct.unpack('>f', self.read_bytes(4))[0]
+    
+    def read_float64(self) -> float:
+        return struct.unpack('>d', self.read_bytes(8))[0]
+    
     def read_string(self, length: int) -> str:
         return self.read_bytes(length).decode('utf-8')
     
+    def decode_value(self) -> Any:
+        """解码单个MessagePack值"""
+        if self.pos >= self.length:
+            raise ValueError("Unexpected end of data")
+            
+        format_byte = self.read_byte()
+        
+        # Positive fixint (0xxxxxxx)
+        if format_byte <= 0x7f:
+            return format_byte
+        
+        # Fixmap (1000xxxx)
+        elif 0x80 <= format_byte <= 0x8f:
+            size = format_byte & 0x0f
+            return self.decode_map(size)
+        
+        # Fixarray (1001xxxx)
+        elif 0x90 <= format_byte <= 0x9f:
+            size = format_byte & 0x0f
+            return self.decode_array(size)
+        
+        # Fixstr (101xxxxx)
+        elif 0xa0 <= format_byte <= 0xbf:
+            size = format_byte & 0x1f
+            return self.read_string(size)
+        
+        # nil
+        elif format_byte == 0xc0:
+            return None
+        
+        # false
+        elif format_byte == 0xc2:
+            return False
+        
+        # true
+        elif format_byte == 0xc3:
+            return True
+        
+        # bin 8
+        elif format_byte == 0xc4:
+            size = self.read_uint8()
+            return self.read_bytes(size)
+        
+        # bin 16
+        elif format_byte == 0xc5:
+            size = self.read_uint16()
+            return self.read_bytes(size)
+        
+        # bin 32
+        elif format_byte == 0xc6:
+            size = self.read_uint32()
+            return self.read_bytes(size)
+        
+        # float 32
+        elif format_byte == 0xca:
+            return self.read_float32()
+        
+        # float 64
+        elif format_byte == 0xcb:
+            return self.read_float64()
+        
+        # uint 8
+        elif format_byte == 0xcc:
+            return self.read_uint8()
+        
+        # uint 16
+        elif format_byte == 0xcd:
+            return self.read_uint16()
+        
+        # uint 32
+        elif format_byte == 0xce:
+            return self.read_uint32()
+        
+        # uint 64
+        elif format_byte == 0xcf:
+            return self.read_uint64()
+        
+        # int 8
+        elif format_byte == 0xd0:
+            return self.read_int8()
+        
+        # int 16
+        elif format_byte == 0xd1:
+            return self.read_int16()
+        
+        # int 32
+        elif format_byte == 0xd2:
+            return self.read_int32()
+        
+        # int 64
+        elif format_byte == 0xd3:
+            return self.read_int64()
+        
+        # str 8
+        elif format_byte == 0xd9:
+            size = self.read_uint8()
+            return self.read_string(size)
+        
+        # str 16
+        elif format_byte == 0xda:
+            size = self.read_uint16()
+            return self.read_string(size)
+        
+        # str 32
+        elif format_byte == 0xdb:
+            size = self.read_uint32()
+            return self.read_string(size)
+        
+        # array 16
+        elif format_byte == 0xdc:
+            size = self.read_uint16()
+            return self.decode_array(size)
+        
+        # array 32
+        elif format_byte == 0xdd:
+            size = self.read_uint32()
+            return self.decode_array(size)
+        
+        # map 16
+        elif format_byte == 0xde:
+            size = self.read_uint16()
+            return self.decode_map(size)
+        
+        # map 32
+        elif format_byte == 0xdf:
+            size = self.read_uint32()
+            return self.decode_map(size)
+        
+        # Negative fixint (111xxxxx)
+        elif format_byte >= 0xe0:
+            return format_byte - 256  # Convert to signed
+        
+        else:
+            raise ValueError(f"Unknown format byte: 0x{format_byte:02x}")
+    
+    def decode_array(self, size: int) -> List[Any]:
+        """解码数组"""
+        result = []
+        for _ in range(size):
+            result.append(self.decode_value())
+        return result
+    
+    def decode_map(self, size: int) -> Dict[Any, Any]:
+        """解码映射"""
+        result = {}
+        for _ in range(size):
+            key = self.decode_value()
+            value = self.decode_value()
+            result[key] = value
+        return result
+    
     def decode(self) -> Any:
-        """简化的MessagePack解码"""
+        """解码MessagePack数据"""
         try:
-            # 使用msgpack库进行解码
-            return msgpack.unpackb(self.data, raw=False, strict_map_key=False)
+            return self.decode_value()
         except Exception as e:
-            # 如果msgpack解码失败，返回原始数据的base64编码
+            # 如果解码失败，返回原始数据的base64编码
             return base64.b64encode(self.data).decode('utf-8')
 
 
