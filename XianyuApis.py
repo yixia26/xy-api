@@ -1,11 +1,11 @@
-import json
 import time
 import os
 import re
+import sys
 
 import requests
 from loguru import logger
-from utils.xianyu_utils import generate_sign, trans_cookies, generate_device_id
+from utils.xianyu_utils import generate_sign
 
 
 class XianyuApis:
@@ -80,16 +80,74 @@ class XianyuApis:
                 with open(env_path, 'w', encoding='utf-8') as f:
                     f.write(new_env_content)
                     
-                logger.info("已更新.env文件中的COOKIES_STR")
+                logger.debug("已更新.env文件中的COOKIES_STR")
             else:
                 logger.warning(".env文件中未找到COOKIES_STR配置项")
         except Exception as e:
             logger.warning(f"更新.env文件失败: {str(e)}")
         
+    def hasLogin(self, retry_count=0):
+        """调用hasLogin.do接口进行登录状态检查"""
+        if retry_count >= 2:
+            logger.error("Login检查失败，重试次数过多")
+            return False
+            
+        try:
+            url = 'https://passport.goofish.com/newlogin/hasLogin.do'
+            params = {
+                'appName': 'xianyu',
+                'fromSite': '77'
+            }
+            data = {
+                'hid': self.session.cookies.get('unb', ''),
+                'ltl': 'true',
+                'appName': 'xianyu',
+                'appEntrance': 'web',
+                '_csrf_token': self.session.cookies.get('XSRF-TOKEN', ''),
+                'umidToken': '',
+                'hsiz': self.session.cookies.get('cookie2', ''),
+                'bizParams': 'taobaoBizLoginFrom=web',
+                'mainPage': 'false',
+                'isMobile': 'false',
+                'lang': 'zh_CN',
+                'returnUrl': '',
+                'fromSite': '77',
+                'isIframe': 'true',
+                'documentReferer': 'https://www.goofish.com/',
+                'defaultView': 'hasLogin',
+                'umidTag': 'SERVER',
+                'deviceId': self.session.cookies.get('cna', '')
+            }
+            
+            response = self.session.post(url, params=params, data=data)
+            res_json = response.json()
+            
+            if res_json.get('content', {}).get('success'):
+                logger.debug("Login成功")
+                # 清理和更新cookies
+                self.clear_duplicate_cookies()
+                return True
+            else:
+                logger.warning(f"Login失败: {res_json}")
+                time.sleep(0.5)
+                return self.hasLogin(retry_count + 1)
+                
+        except Exception as e:
+            logger.error(f"Login请求异常: {str(e)}")
+            time.sleep(0.5)
+            return self.hasLogin(retry_count + 1)
+
     def get_token(self, device_id, retry_count=0):
-        if retry_count >= 3:  # 最多重试3次
-            logger.error("获取token失败，重试次数过多")
-            return {"error": "获取token失败，重试次数过多"}
+        if retry_count >= 2:  # 最多重试3次
+            logger.warning("获取token失败，尝试重新登陆")
+            # 尝试通过hasLogin重新登录
+            if self.hasLogin():
+                logger.info("重新登录成功，重新尝试获取token")
+                return self.get_token(device_id, 0)  # 重置重试次数
+            else:
+                logger.error("重新登录失败，Cookie已失效")
+                logger.error("🔴 程序即将退出，请更新.env文件中的COOKIES_STR后重新启动")
+                sys.exit(1)  # 直接退出程序
             
         params = {
             'jsv': '2.7.2',
@@ -115,20 +173,33 @@ class XianyuApis:
         
         sign = generate_sign(params['t'], token, data_val)
         params['sign'] = sign
-        response = self.session.post('https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/', params=params, data=data)
-        res_json = response.json()
-        if isinstance(res_json, dict):
-            ret_value = res_json.get('ret', [])
-            # 检查ret是否包含成功信息
-            if not any('SUCCESS::调用成功' in ret for ret in ret_value):
-                logger.warning(f"API调用失败，错误信息: {ret_value}")
-                # 处理响应中的Set-Cookie
-                if 'Set-Cookie' in response.headers:
-                    logger.info("检测到Set-Cookie，等待cookie更新")
-                    self.clear_duplicate_cookies()
-                time.sleep(0.5)
+        
+        try:
+            response = self.session.post('https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/', params=params, data=data)
+            res_json = response.json()
+            
+            if isinstance(res_json, dict):
+                ret_value = res_json.get('ret', [])
+                # 检查ret是否包含成功信息
+                if not any('SUCCESS::调用成功' in ret for ret in ret_value):
+                    logger.warning(f"Token API调用失败，错误信息: {ret_value}")
+                    # 处理响应中的Set-Cookie
+                    if 'Set-Cookie' in response.headers:
+                        logger.debug("检测到Set-Cookie，更新cookie")  # 降级为DEBUG并简化
+                        self.clear_duplicate_cookies()
+                    time.sleep(0.5)
+                    return self.get_token(device_id, retry_count + 1)
+                else:
+                    logger.info("Token获取成功")
+                    return res_json
+            else:
+                logger.error(f"Token API返回格式异常: {res_json}")
                 return self.get_token(device_id, retry_count + 1)
-        return res_json
+                
+        except Exception as e:
+            logger.error(f"Token API请求异常: {str(e)}")
+            time.sleep(0.5)
+            return self.get_token(device_id, retry_count + 1)
 
     def get_item_info(self, item_id, retry_count=0):
         """获取商品信息，自动处理token失效的情况"""
@@ -162,23 +233,34 @@ class XianyuApis:
         sign = generate_sign(params['t'], token, data_val)
         params['sign'] = sign
         
-        response = self.session.post(
-            'https://h5api.m.goofish.com/h5/mtop.taobao.idle.pc.detail/1.0/', 
-            params=params, 
-            data=data
-        )
-        
-        res_json = response.json()
-        # 检查返回状态
-        if isinstance(res_json, dict):
-            ret_value = res_json.get('ret', [])
-            # 检查ret是否包含成功信息
-            if not any('SUCCESS::调用成功' in ret for ret in ret_value):
-                logger.warning(f"API调用失败，错误信息: {ret_value}")
-                # 处理响应中的Set-Cookie
-                if 'Set-Cookie' in response.headers:
-                    logger.info("检测到Set-Cookie，等待cookie更新")
-                    self.clear_duplicate_cookies()
-                time.sleep(0.5)
+        try:
+            response = self.session.post(
+                'https://h5api.m.goofish.com/h5/mtop.taobao.idle.pc.detail/1.0/', 
+                params=params, 
+                data=data
+            )
+            
+            res_json = response.json()
+            # 检查返回状态
+            if isinstance(res_json, dict):
+                ret_value = res_json.get('ret', [])
+                # 检查ret是否包含成功信息
+                if not any('SUCCESS::调用成功' in ret for ret in ret_value):
+                    logger.warning(f"商品信息API调用失败，错误信息: {ret_value}")
+                    # 处理响应中的Set-Cookie
+                    if 'Set-Cookie' in response.headers:
+                        logger.debug("检测到Set-Cookie，更新cookie")
+                        self.clear_duplicate_cookies()
+                    time.sleep(0.5)
+                    return self.get_item_info(item_id, retry_count + 1)
+                else:
+                    logger.debug(f"商品信息获取成功: {item_id}")
+                    return res_json
+            else:
+                logger.error(f"商品信息API返回格式异常: {res_json}")
                 return self.get_item_info(item_id, retry_count + 1)
-        return res_json
+                
+        except Exception as e:
+            logger.error(f"商品信息API请求异常: {str(e)}")
+            time.sleep(0.5)
+            return self.get_item_info(item_id, retry_count + 1)

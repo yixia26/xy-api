@@ -7,6 +7,7 @@ import websockets
 from loguru import logger
 from dotenv import load_dotenv
 from XianyuApis import XianyuApis
+import sys
 
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
@@ -26,21 +27,83 @@ class XianyuLive:
         self.context_manager = ChatContextManager()
         
         # 心跳相关配置
-        self.heartbeat_interval = 15  # 心跳间隔15秒
-        self.heartbeat_timeout = 5    # 心跳超时5秒
+        self.heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # 心跳间隔，默认15秒
+        self.heartbeat_timeout = int(os.getenv("HEARTBEAT_TIMEOUT", "5"))     # 心跳超时，默认5秒
         self.last_heartbeat_time = 0
         self.last_heartbeat_response = 0
         self.heartbeat_task = None
         self.ws = None
         
+        # Token刷新相关配置
+        self.token_refresh_interval = int(os.getenv("TOKEN_REFRESH_INTERVAL", "3600"))  # Token刷新间隔，默认1小时
+        self.token_retry_interval = int(os.getenv("TOKEN_RETRY_INTERVAL", "300"))       # Token重试间隔，默认5分钟
+        self.last_token_refresh_time = 0
+        self.current_token = None
+        self.token_refresh_task = None
+        self.connection_restart_flag = False  # 连接重启标志
+        
         # 人工接管相关配置
         self.manual_mode_conversations = set()  # 存储处于人工接管模式的会话ID
-        self.manual_mode_timeout = 3600  # 人工接管超时时间（1小时）
+        self.manual_mode_timeout = int(os.getenv("MANUAL_MODE_TIMEOUT", "3600"))  # 人工接管超时时间，默认1小时
         self.manual_mode_timestamps = {}  # 记录进入人工模式的时间
+        
+        # 消息过期时间配置
+        self.message_expire_time = int(os.getenv("MESSAGE_EXPIRE_TIME", "300000"))  # 消息过期时间，默认5分钟
         
         # 人工接管关键词，从环境变量读取
         self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
-        logger.info(f"人工接管切换关键词为: {self.toggle_keywords}")
+
+    async def refresh_token(self):
+        """刷新token"""
+        try:
+            logger.info("开始刷新token...")
+            
+            # 获取新token（如果Cookie失效，get_token会直接退出程序）
+            token_result = self.xianyu.get_token(self.device_id)
+            if 'data' in token_result and 'accessToken' in token_result['data']:
+                new_token = token_result['data']['accessToken']
+                self.current_token = new_token
+                self.last_token_refresh_time = time.time()
+                logger.info("Token刷新成功")
+                return new_token
+            else:
+                logger.error(f"Token刷新失败: {token_result}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Token刷新异常: {str(e)}")
+            return None
+
+    async def token_refresh_loop(self):
+        """Token刷新循环"""
+        while True:
+            try:
+                current_time = time.time()
+                
+                # 检查是否需要刷新token
+                if current_time - self.last_token_refresh_time >= self.token_refresh_interval:
+                    logger.info("Token即将过期，准备刷新...")
+                    
+                    new_token = await self.refresh_token()
+                    if new_token:
+                        logger.info("Token刷新成功，准备重新建立连接...")
+                        # 设置连接重启标志
+                        self.connection_restart_flag = True
+                        # 关闭当前WebSocket连接，触发重连
+                        if self.ws:
+                            await self.ws.close()
+                        break
+                    else:
+                        logger.error("Token刷新失败，将在{}分钟后重试".format(self.token_retry_interval // 60))
+                        await asyncio.sleep(self.token_retry_interval)  # 使用配置的重试间隔
+                        continue
+                
+                # 每分钟检查一次
+                await asyncio.sleep(60)
+                
+            except Exception as e:
+                logger.error(f"Token刷新循环出错: {e}")
+                await asyncio.sleep(60)
 
     async def send_msg(self, ws, cid, toid, text):
         text = {
@@ -89,13 +152,21 @@ class XianyuLive:
         await ws.send(json.dumps(msg))
 
     async def init(self, ws):
-        token = self.xianyu.get_token(self.device_id)['data']['accessToken']
+        # 如果没有token或者token过期，获取新token
+        if not self.current_token or (time.time() - self.last_token_refresh_time) >= self.token_refresh_interval:
+            logger.info("获取初始token...")
+            await self.refresh_token()
+        
+        if not self.current_token:
+            logger.error("无法获取有效token，初始化失败")
+            raise Exception("Token获取失败")
+            
         msg = {
             "lwp": "/reg",
             "headers": {
                 "cache-header": "app-key token ua wv",
                 "app-key": "444e9908a51d1cb236a27862abc769c9",
-                "token": token,
+                "token": self.current_token,
                 "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 DingTalk(2.1.5) OS(Windows/10) Browser(Chrome/133.0.0.0) DingWeb/2.1.5 IMPaaS DingWeb/2.1.5",
                 "dt": "j",
                 "wv": "im:3,au:3,sy:6",
@@ -270,7 +341,7 @@ class XianyuLive:
                 elif message['3']['redReminder'] == '交易关闭':
                     user_id = message['1'].split('@')[0]
                     user_url = f'https://www.goofish.com/personal?userId={user_id}'
-                    logger.info(f'卖家 {user_url} 交易关闭')
+                    logger.info(f'买家 {user_url} 交易关闭')
                     return
                 elif message['3']['redReminder'] == '等待卖家发货':
                     user_id = message['1'].split('@')[0]
@@ -297,7 +368,7 @@ class XianyuLive:
             send_message = message["1"]["10"]["reminderContent"]
             
             # 时效性验证（过滤5分钟前消息）
-            if (time.time() * 1000 - create_time) > 300000:
+            if (time.time() * 1000 - create_time) > self.message_expire_time:
                 logger.debug("过期消息丢弃")
                 return
                 
@@ -439,6 +510,9 @@ class XianyuLive:
     async def main(self):
         while True:
             try:
+                # 重置连接重启标志
+                self.connection_restart_flag = False
+                
                 headers = {
                     "Cookie": self.cookies_str,
                     "Host": "wss-goofish.dingtalk.com",
@@ -462,8 +536,16 @@ class XianyuLive:
                     # 启动心跳任务
                     self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
                     
+                    # 启动token刷新任务
+                    self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
+                    
                     async for message in websocket:
                         try:
+                            # 检查是否需要重启连接
+                            if self.connection_restart_flag:
+                                logger.info("检测到连接重启标志，准备重新建立连接...")
+                                break
+                                
                             message_data = json.loads(message)
                             
                             # 处理心跳响应
@@ -496,28 +578,48 @@ class XianyuLive:
 
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("WebSocket连接已关闭")
-                if self.heartbeat_task:
-                    self.heartbeat_task.cancel()
-                    try:
-                        await self.heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
-                await asyncio.sleep(5)  # 等待5秒后重连
                 
             except Exception as e:
                 logger.error(f"连接发生错误: {e}")
+                
+            finally:
+                # 清理任务
                 if self.heartbeat_task:
                     self.heartbeat_task.cancel()
                     try:
                         await self.heartbeat_task
                     except asyncio.CancelledError:
                         pass
-                await asyncio.sleep(5)  # 等待5秒后重连
+                        
+                if self.token_refresh_task:
+                    self.token_refresh_task.cancel()
+                    try:
+                        await self.token_refresh_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                # 如果是主动重启，立即重连；否则等待5秒
+                if self.connection_restart_flag:
+                    logger.info("主动重启连接，立即重连...")
+                else:
+                    logger.info("等待5秒后重连...")
+                    await asyncio.sleep(5)
 
 
 if __name__ == '__main__':
-    #加载环境变量 cookie
+    # 加载环境变量
     load_dotenv()
+    
+    # 配置日志级别
+    log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    logger.remove()  # 移除默认handler
+    logger.add(
+        sys.stderr,
+        level=log_level,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+    )
+    logger.info(f"日志级别设置为: {log_level}")
+    
     cookies_str = os.getenv("COOKIES_STR")
     bot = XianyuReplyBot()
     xianyuLive = XianyuLive(cookies_str)
