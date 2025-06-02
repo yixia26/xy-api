@@ -159,4 +159,182 @@ https://github.com/cv-cat/XianYuApis
  </picture>
 </a>
 
+# 闲鱼自动回复API服务
+
+这是一个基于FastAPI的闲鱼自动回复系统的API服务，可以通过API接口管理闲鱼自动回复会话。
+
+## 功能特点
+
+- 支持多会话并发管理
+- 支持会话启动、停止及状态查询
+- 支持获取闲鱼商品详情信息
+- 支持自动回复与人工接管切换
+- 基于WebSocket的闲鱼消息实时处理
+
+## 环境要求
+
+- Python 3.8+
+- FastAPI
+- Uvicorn
+- Loguru
+- Websockets
+- 其他依赖库 (详见 requirements.txt)
+
+## 安装
+
+1. 克隆代码库：
+   ```bash
+   git clone https://github.com/your-repo/xy-api.git
+   cd xy-api
+   ```
+
+2. 安装依赖：
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. 配置环境变量：
+   创建一个 `.env` 文件并添加以下配置：
+   ```
+   LOG_LEVEL=INFO
+   HEARTBEAT_INTERVAL=15
+   HEARTBEAT_TIMEOUT=5
+   TOKEN_REFRESH_INTERVAL=3600
+   TOKEN_RETRY_INTERVAL=300
+   MANUAL_MODE_TIMEOUT=3600
+   MESSAGE_EXPIRE_TIME=300000
+   TOGGLE_KEYWORDS=。
+   PORT=8000
+   ```
+
+## 启动服务
+
+```bash
+python fastapi_server.py
+```
+
+服务将在 `http://0.0.0.0:8000` 启动。你可以通过 `http://0.0.0.0:8000/docs` 访问API文档。
+
+## API接口
+
+### 1. 启动新的闲鱼会话
+
+- **接口**: `POST /start_session`
+- **描述**: 启动一个新的闲鱼自动化会话
+- **请求体**:
+  ```json
+  {
+    "cookies_str": "your_cookies_string"
+  }
+  ```
+- **响应**:
+  ```json
+  {
+    "status": "success",
+    "session_id": "uuid",
+    "message": "会话启动成功"
+  }
+  ```
+
+### 2. 停止闲鱼会话
+
+- **接口**: `POST /stop_session/{session_id}`
+- **描述**: 停止指定的闲鱼自动化会话
+- **响应**:
+  ```json
+  {
+    "status": "success",
+    "session_id": "uuid",
+    "message": "会话已停止"
+  }
+  ```
+
+### 3. 获取所有活跃会话
+
+- **接口**: `GET /sessions`
+- **描述**: 获取所有当前活跃的闲鱼自动化会话
+- **响应**:
+  ```json
+  {
+    "status": "success",
+    "active_sessions": [
+      {
+        "session_id": "uuid",
+        "status": "active",
+        "start_time": "2023-06-02T15:30:00"
+      }
+    ]
+  }
+  ```
+
+### 4. 获取商品详情
+
+- **接口**: `GET /item_detail/{session_id}/{item_id}`
+- **描述**: 获取指定会话和商品 ID 的商品详情信息
+- **响应**:
+  ```json
+  {
+    "status": "success",
+    "item_id": "item12345",
+    "item_name": "闲鱼商品名称",
+    "price": "100.00"
+  }
+  ```
+
+### 5. 健康检查
+
+- **接口**: `GET /health`
+- **描述**: 检查API服务的健康状态
+- **响应**:
+  ```json
+  {
+    "status": "healthy", 
+    "timestamp": "2023-06-02T15:30:00"
+  }
+  ```
+
+## 客户端示例
+
+以下是使用Python请求库调用API的示例：
+
+```python
+import requests
+
+# 配置API基础URL
+base_url = "http://localhost:8000"
+
+# 启动会话
+cookies_str = "your_cookies_string"
+response = requests.post(
+    f"{base_url}/start_session",
+    json={"cookies_str": cookies_str}
+)
+session_id = response.json()["session_id"]
+print(f"会话已启动，ID: {session_id}")
+
+# 获取所有会话
+response = requests.get(f"{base_url}/sessions")
+print(f"活跃会话: {response.json()}")
+
+# 获取商品详情
+item_id = "item12345"
+response = requests.get(f"{base_url}/item_detail/{session_id}/{item_id}")
+print(f"商品详情: {response.json()}")
+
+# 停止会话
+response = requests.post(f"{base_url}/stop_session/{session_id}")
+print(f"会话已停止: {response.json()}")
+```
+
+## 注意事项
+
+1. 确保提供有效的闲鱼账号Cookie
+2. 会话在闲置一段时间后会自动刷新Token
+3. 可以通过环境变量定制服务的各项参数
+4. 人工接管模式超时后会自动恢复自动回复模式
+
+## 联系方式
+
+如有问题，请联系[your-email@example.com]
+
 
