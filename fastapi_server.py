@@ -9,6 +9,7 @@ import uvicorn
 import os
 from loguru import logger
 import sys
+import aioredis
 
 # 导入闲鱼主程序相关模块
 from XianyuLive import XianyuLive
@@ -49,12 +50,37 @@ class ItemDetailResponse(BaseModel):
     price: Optional[str] = None
     message: Optional[str] = None
 
+# Redis 连接配置
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时初始化 Redis 连接池"""
+    try:
+        app.state.redis = await aioredis.from_url(
+            REDIS_URL,
+            encoding="utf-8",
+            decode_responses=True
+        )
+        logger.info(f"Redis 连接池初始化成功: {REDIS_URL}")
+    except Exception as e:
+        logger.error(f"Redis 连接池初始化失败: {str(e)}")
+        # 这里可以选择继续运行或退出应用
+        # sys.exit(1)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时关闭 Redis 连接池"""
+    if hasattr(app.state, "redis"):
+        await app.state.redis.close()
+        logger.info("Redis 连接池已关闭")
+
 # 会话管理函数
-async def run_xianyu_session(session_id: str, cookies_str: str):
+async def run_xianyu_session(session_id: str, cookies_str: str, redis_client):
     """在后台运行闲鱼会话"""
     try:
-        # 创建闲鱼会话实例
-        xianyu = XianyuLive(cookies_str)
+        # 创建闲鱼会话实例，传递 Redis 客户端
+        xianyu = XianyuLive(cookies_str, redis_client)
         active_sessions[session_id]["xianyu"] = xianyu
         active_sessions[session_id]["task"] = asyncio.create_task(xianyu.main())
         
@@ -78,6 +104,13 @@ async def run_xianyu_session(session_id: str, cookies_str: str):
 async def start_session(request: SessionRequest, background_tasks: BackgroundTasks):
     """启动新的闲鱼会话"""
     try:
+        # 检查 Redis 连接是否可用
+        if not hasattr(app.state, "redis"):
+            return {
+                "status": "error",
+                "message": "Redis 连接不可用，无法启动会话"
+            }
+            
         # 生成唯一会话ID
         session_id = str(uuid.uuid4())
         
@@ -89,8 +122,8 @@ async def start_session(request: SessionRequest, background_tasks: BackgroundTas
             "cookies_str": request.cookies_str
         }
         
-        # 在后台启动会话
-        background_tasks.add_task(run_xianyu_session, session_id, request.cookies_str)
+        # 在后台启动会话，传递 Redis 客户端
+        background_tasks.add_task(run_xianyu_session, session_id, request.cookies_str, app.state.redis)
         
         # 更新状态为活跃
         active_sessions[session_id]["status"] = "active"
@@ -223,7 +256,12 @@ async def get_item_detail(session_id: str, item_id: str):
 # 添加健康检查接口
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    redis_status = "connected" if hasattr(app.state, "redis") else "disconnected"
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.now().isoformat(),
+        "redis": redis_status
+    }
 
 # 启动服务器
 if __name__ == "__main__":

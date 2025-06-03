@@ -9,7 +9,7 @@ class XianyuReplyBot:
     def __init__(self):
         # 初始化OpenAI客户端
         self.client = OpenAI(
-            api_key=os.getenv("API_KEY"),
+            api_key="sk-f116005cf3714a6ab82027214d8cd6fe",
             base_url=os.getenv("MODEL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         )
         self._init_system_prompts()

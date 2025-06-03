@@ -10,7 +10,6 @@ import sys
 
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
 from XianyuApis import XianyuApis
-from XianyuAgent import XianyuReplyBot
 from context_manager import ChatContextManager
 
 
@@ -18,12 +17,13 @@ class XianyuLive:
     """
     闲鱼自动回复系统的核心类，负责WebSocket连接、消息处理和自动回复
     """
-    def __init__(self, cookies_str):
+    def __init__(self, cookies_str, redis_client=None):
         """
         初始化闲鱼自动回复系统
         
         Args:
             cookies_str: 闲鱼登录Cookie字符串
+            redis_client: Redis客户端实例，用于消息队列
         """
         self.xianyu = XianyuApis()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
@@ -33,6 +33,9 @@ class XianyuLive:
         self.myid = self.cookies['unb']
         self.device_id = generate_device_id(self.myid)
         self.context_manager = ChatContextManager()
+        
+        # 保存Redis客户端
+        self.redis = redis_client
         
         # 心跳相关配置
         self.heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # 心跳间隔，默认15秒
@@ -61,8 +64,8 @@ class XianyuLive:
         # 人工接管关键词，从环境变量读取
         self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
         
-        # 初始化机器人实例
-        self.bot = XianyuReplyBot()
+        # AI响应监听任务
+        self.ai_response_task = None
 
     async def refresh_token(self):
         """刷新token"""
@@ -371,6 +374,63 @@ class XianyuLive:
         else:
             self.enter_manual_mode(chat_id)
             return "manual"
+            
+    async def _listen_for_ai_responses(self):
+        """
+        监听AI回复消息并发送给用户
+        """
+        if not self.redis:
+            logger.error("Redis客户端未初始化，无法监听AI回复")
+            return
+            
+        logger.info(f"开始监听AI回复队列: ai:response:{self.myid}")
+        
+        while True:
+            try:
+                # 使用阻塞式弹出，等待AI回复
+                response = await self.redis.blpop(f"ai:response:{self.myid}", timeout=0)
+                
+                if not response:
+                    # 超时或队列为空
+                    continue
+                    
+                # response是一个元组(key, value)，我们需要value
+                _, response_data = response
+                
+                # 解析回复JSON
+                try:
+                    ai_response = json.loads(response_data)
+                    
+                    chat_id = ai_response.get("chat_id")
+                    receiver_id = ai_response.get("receiver_id")
+                    reply_content = ai_response.get("reply_content")
+                    item_id = ai_response.get("item_id")
+                    
+                    if not all([chat_id, receiver_id, reply_content]):
+                        logger.error(f"AI回复数据不完整: {ai_response}")
+                        continue
+                    
+                    # 发送AI回复给用户
+                    if self.ws:
+                        await self.send_msg(self.ws, chat_id, receiver_id, reply_content)
+                        logger.info(f"已发送AI回复: {reply_content[:30]}...")
+                        
+                        # 更新对话上下文
+                        if item_id:
+                            self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", reply_content)
+                    else:
+                        logger.warning("WebSocket连接不可用，无法发送AI回复")
+                        
+                except json.JSONDecodeError:
+                    logger.error(f"AI回复解析失败: {response_data}")
+                except Exception as e:
+                    logger.error(f"处理AI回复时发生错误: {str(e)}")
+                    
+            except Exception as e:
+                # 处理Redis连接错误等异常
+                logger.error(f"监听AI回复队列时发生错误: {str(e)}")
+                # 等待一段时间后重试
+                await asyncio.sleep(5)
 
     async def handle_message(self, message_data, websocket):
         """
@@ -381,7 +441,6 @@ class XianyuLive:
             websocket: WebSocket连接
         """
         try:
-
             try:
                 message = message_data
                 ack = {
@@ -508,6 +567,7 @@ class XianyuLive:
             if self.is_system_message(message):
                 logger.debug("系统消息，跳过处理")
                 return
+                
             # 从数据库中获取商品信息，如果不存在则从API获取并保存
             item_info = self.context_manager.get_item_info(item_id)
             if not item_info:
@@ -527,24 +587,35 @@ class XianyuLive:
             
             # 获取完整的对话上下文
             context = self.context_manager.get_context_by_chat(chat_id)
-            # 生成回复
-            bot_reply = self.bot.generate_reply(
-                send_message,
-                item_description,
-                context=context
-            )
             
-            # 检查是否为价格意图，如果是则增加议价次数
-            if self.bot.last_intent == "price":
-                self.context_manager.increment_bargain_count_by_chat(chat_id)
-                bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
-                logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
-            
-            # 添加机器人回复到上下文
-            self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", bot_reply)
-            
-            logger.info(f"机器人回复: {bot_reply}")
-            await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
+            # 如果Redis可用，将消息推送到队列
+            if self.redis:
+                try:
+                    # 构造消息数据
+                    customer_message = {
+                        "chat_id": chat_id,
+                        "sender_id": send_user_id,
+                        "sender_name": send_user_name,
+                        "item_id": item_id,
+                        "message": send_message,
+                        "create_time": create_time,
+                        "seller_id": self.myid,
+                        "item_description": item_description,
+                        "context": context
+                    }
+                    
+                    # 推送到Redis队列
+                    await self.redis.rpush(
+                        f"customer:message:{self.myid}", 
+                        json.dumps(customer_message)
+                    )
+                    
+                    logger.info(f"已将消息推送到队列: customer:message:{self.myid}")
+                    
+                except Exception as e:
+                    logger.error(f"推送消息到Redis队列失败: {str(e)}")
+            else:
+                logger.warning("Redis客户端未初始化，无法推送消息到队列")
             
         except Exception as e:
             logger.error(f"处理消息时发生错误: {str(e)}")
@@ -661,6 +732,10 @@ class XianyuLive:
                     # 启动token刷新任务
                     self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
                     
+                    # 启动AI响应监听任务
+                    if self.redis:
+                        self.ai_response_task = asyncio.create_task(self._listen_for_ai_responses())
+                    
                     async for message in websocket:
                         try:
                             # 检查是否需要重启连接
@@ -717,6 +792,13 @@ class XianyuLive:
                     self.token_refresh_task.cancel()
                     try:
                         await self.token_refresh_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                if self.ai_response_task:
+                    self.ai_response_task.cancel()
+                    try:
+                        await self.ai_response_task
                     except asyncio.CancelledError:
                         pass
                 

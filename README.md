@@ -338,3 +338,5 @@ print(f"会话已停止: {response.json()}")
 如有问题，请联系[your-email@example.com]
 
 
+## 常见问题
+使用websockets==10.0避免出现  an unexpected keyword argument 'extra_headers' 问题
