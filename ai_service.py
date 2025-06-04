@@ -92,8 +92,10 @@ class AIService:
             
             # 这里可以调用实际的AI模型生成回复
             # 简单示例：生成一个回复
-            reply_content = f"您好，感谢您的咨询！我已收到您的消息："{customer_message}"。请问还有其他问题吗？"
-            
+            reply_content = f"您好，感谢您的咨询！我已收到您的消息："
+            var = {customer_message}
+            "。请问还有其他问题吗？"
+
             # 构造回复数据
             reply = {
                 "chat_id": chat_id,
