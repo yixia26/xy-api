@@ -383,12 +383,12 @@ class XianyuLive:
             logger.error("Redis客户端未初始化，无法监听AI回复")
             return
             
-        logger.info(f"开始监听AI回复队列: ai:response:{self.myid}")
+        logger.info(f"开始监听AI回复队列: ai_reply_queue:{self.myid}")
         
         while True:
             try:
                 # 使用阻塞式弹出，等待AI回复
-                response = await self.redis.blpop(f"ai:response:{self.myid}", timeout=0)
+                response = await self.redis.blpop(f"ai_reply_queue:{self.myid}", timeout=0)
                 
                 if not response:
                     # 超时或队列为空
@@ -606,11 +606,11 @@ class XianyuLive:
                     
                     # 推送到Redis队列
                     await self.redis.rpush(
-                        f"customer:message:{self.myid}", 
+                        f"ai_message_queue:{self.myid}", 
                         json.dumps(customer_message)
                     )
                     
-                    logger.info(f"已将消息推送到队列: customer:message:{self.myid}")
+                    logger.info(f"已将消息推送到队列: ai_message_queue:{self.myid}")
                     
                 except Exception as e:
                     logger.error(f"推送消息到Redis队列失败: {str(e)}")
