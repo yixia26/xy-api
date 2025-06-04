@@ -413,6 +413,7 @@ class XianyuLive:
                     # 发送AI回复给用户
                     if self.ws:
                         await self.send_msg(self.ws, chat_id, receiver_id, reply_content)
+                        logger.info(f"chat_id: {chat_id}, receiver_id: {receiver_id}, reply_content: {reply_content}")
                         logger.info(f"已发送AI回复: {reply_content[:30]}...")
                         
                         # 更新对话上下文
@@ -604,10 +605,10 @@ class XianyuLive:
                         "context": context
                     }
                     
-                    # 推送到Redis队列
+                    # 推送到Redis队列，确保中文不被转义
                     await self.redis.rpush(
                         f"ai_message_queue:{self.myid}", 
-                        json.dumps(customer_message)
+                        json.dumps(customer_message, ensure_ascii=False)
                     )
                     
                     logger.info(f"已将消息推送到队列: ai_message_queue:{self.myid}")

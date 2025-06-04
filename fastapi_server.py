@@ -9,7 +9,7 @@ import uvicorn
 import os
 from loguru import logger
 import sys
-import aioredis
+import redis.asyncio as redis
 
 # 导入闲鱼主程序相关模块
 from XianyuLive import XianyuLive
@@ -57,7 +57,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
 async def startup_event():
     """应用启动时初始化 Redis 连接池"""
     try:
-        app.state.redis = await aioredis.from_url(
+        app.state.redis = await redis.from_url(
             REDIS_URL,
             encoding="utf-8",
             decode_responses=True
@@ -76,11 +76,15 @@ async def shutdown_event():
         logger.info("Redis 连接池已关闭")
 
 # 会话管理函数
-async def run_xianyu_session(session_id: str, cookies_str: str, redis_client):
+async def run_xianyu_session(session_id: str, cookies_str: str, redis_client, xianyu_instance=None):
     """在后台运行闲鱼会话"""
     try:
-        # 创建闲鱼会话实例，传递 Redis 客户端
-        xianyu = XianyuLive(cookies_str, redis_client)
+        # 如果没有传入已创建的闲鱼实例，则创建一个新的
+        if xianyu_instance is None:
+            xianyu = XianyuLive(cookies_str, redis_client)
+        else:
+            xianyu = xianyu_instance
+            
         active_sessions[session_id]["xianyu"] = xianyu
         active_sessions[session_id]["task"] = asyncio.create_task(xianyu.main())
         
@@ -111,8 +115,44 @@ async def start_session(request: SessionRequest, background_tasks: BackgroundTas
                 "message": "Redis 连接不可用，无法启动会话"
             }
             
-        # 生成唯一会话ID
-        session_id = str(uuid.uuid4())
+        # 先创建闲鱼实例以获取myid
+        try:
+            xianyu = XianyuLive(request.cookies_str, app.state.redis)
+            
+            # 检查 myid 是否成功提取
+            if not hasattr(xianyu, 'myid') or not xianyu.myid:
+                return {
+                    "status": "error",
+                    "message": "无法从cookies中提取用户ID (unb)，请检查cookies是否有效"
+                }
+                
+            session_id = xianyu.myid  # 使用myid作为会话ID
+            
+        except KeyError as e:
+            logger.error(f"创建闲鱼实例失败: cookies中缺少关键字段 - {str(e)}")
+            return {
+                "status": "error",
+                "message": f"cookies中缺少必要字段: {str(e)}，请确保cookies有效"
+            }
+        except Exception as e:
+            logger.error(f"创建闲鱼实例失败: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"无法获取用户ID: {str(e)}"
+            }
+            
+        # 检查是否已存在相同ID的会话
+        if session_id in active_sessions:
+            # 如果会话已存在且活跃，则返回错误
+            if active_sessions[session_id]["status"] == "active":
+                return {
+                    "status": "error",
+                    "session_id": session_id,
+                    "message": "该用户已有活跃会话，请先停止当前会话"
+                }
+            # 如果会话存在但已停止，则清除旧会话信息
+            else:
+                logger.info(f"清除用户 {session_id} 的旧会话信息")
         
         # 记录会话信息
         active_sessions[session_id] = {
@@ -122,11 +162,19 @@ async def start_session(request: SessionRequest, background_tasks: BackgroundTas
             "cookies_str": request.cookies_str
         }
         
-        # 在后台启动会话，传递 Redis 客户端
-        background_tasks.add_task(run_xianyu_session, session_id, request.cookies_str, app.state.redis)
+        # 在后台启动会话，传递已创建的闲鱼实例
+        background_tasks.add_task(run_xianyu_session, session_id, request.cookies_str, app.state.redis, xianyu)
         
         # 更新状态为活跃
         active_sessions[session_id]["status"] = "active"
+        
+        # 向Redis Pub/Sub通道发送会话启动通知
+        try:
+            await app.state.redis.publish('ai_session:start', session_id)
+            logger.info(f"已发送会话启动通知到Redis通道: ai_session:start, myid: {session_id}")
+        except Exception as e:
+            logger.error(f"发送会话启动通知失败: {str(e)}")
+            # 通知发送失败不影响会话启动
         
         logger.info(f"成功启动会话: {session_id}")
         return {
@@ -141,24 +189,35 @@ async def start_session(request: SessionRequest, background_tasks: BackgroundTas
             "message": f"会话启动失败: {str(e)}"
         }
 
-@app.post("/stop_session/{session_id}", response_model=SessionResponse)
+@app.post("/stop_session/{c}", response_model=SessionResponse)
 async def stop_session(session_id: str):
     """停止指定的闲鱼会话"""
     try:
         if session_id not in active_sessions:
+            logger.warning(f"尝试停止不存在的会话: {session_id}")
             raise HTTPException(status_code=404, detail="会话不存在")
         
+        logger.info(f"尝试停止会话: {session_id}")
         session = active_sessions[session_id]
+        
         if "task" in session and not session["task"].done():
             # 取消会话任务
             session["task"].cancel()
+            logger.info(f"已取消会话 {session_id} 的任务")
+            
             try:
                 await session["task"]
             except asyncio.CancelledError:
-                pass
+                logger.debug(f"会话 {session_id} 的任务已正确取消")
+            except Exception as e:
+                logger.error(f"取消会话 {session_id} 的任务时发生错误: {str(e)}")
+        else:
+            logger.warning(f"会话 {session_id} 无活动任务或任务已完成")
         
         # 更新会话状态
         active_sessions[session_id]["status"] = "stopped"
+        active_sessions[session_id]["stop_time"] = datetime.now().isoformat()
+        
         logger.info(f"会话 {session_id} 已停止")
         
         return {
@@ -172,6 +231,7 @@ async def stop_session(session_id: str):
         logger.error(f"停止会话 {session_id} 失败: {str(e)}")
         return {
             "status": "error",
+            "session_id": session_id,
             "message": f"停止会话失败: {str(e)}"
         }
 
@@ -181,11 +241,35 @@ async def get_sessions():
     try:
         sessions_info = []
         for session_id, session in active_sessions.items():
-            sessions_info.append({
+            # 计算会话运行时间
+            start_time = datetime.fromisoformat(session["start_time"])
+            current_time = datetime.now()
+            running_time_seconds = (current_time - start_time).total_seconds()
+            
+            # 格式化运行时间
+            hours, remainder = divmod(int(running_time_seconds), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            running_time = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            
+            info = {
                 "session_id": session_id,
                 "status": session["status"],
-                "start_time": session["start_time"]
-            })
+                "start_time": session["start_time"],
+                "running_time": running_time
+            }
+            
+            # 如果会话已停止，添加停止时间
+            if "stop_time" in session:
+                info["stop_time"] = session["stop_time"]
+            
+            # 如果有错误信息，添加到返回数据中
+            if "error" in session:
+                info["error"] = session["error"]
+                
+            sessions_info.append(info)
+        
+        # 按状态排序：活跃的会话排在前面
+        sessions_info.sort(key=lambda x: 0 if x["status"] == "active" else 1)
         
         return {
             "status": "success",
