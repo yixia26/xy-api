@@ -32,6 +32,9 @@ active_sessions: Dict[str, Dict[str, Any]] = {}
 class SessionRequest(BaseModel):
     cookies_str: str
 
+class StopSessionRequest(BaseModel):
+    session_id: str
+
 # 响应模型
 class SessionResponse(BaseModel):
     status: str
@@ -189,9 +192,10 @@ async def start_session(request: SessionRequest, background_tasks: BackgroundTas
             "message": f"会话启动失败: {str(e)}"
         }
 
-@app.post("/stop_session/{c}", response_model=SessionResponse)
-async def stop_session(session_id: str):
+@app.post("/stop_session", response_model=SessionResponse)
+async def stop_session(request: StopSessionRequest):
     """停止指定的闲鱼会话"""
+    session_id = request.session_id
     try:
         if session_id not in active_sessions:
             logger.warning(f"尝试停止不存在的会话: {session_id}")
