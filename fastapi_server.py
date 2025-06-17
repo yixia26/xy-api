@@ -222,6 +222,17 @@ async def stop_session(request: StopSessionRequest):
         active_sessions[session_id]["status"] = "stopped"
         active_sessions[session_id]["stop_time"] = datetime.now().isoformat()
         
+        # 向Redis Pub/Sub通道发送会话停止通知
+        try:
+            if hasattr(app.state, "redis"):
+                await app.state.redis.publish('ai_session:stop', session_id)
+                logger.info(f"已发送会话停止通知到Redis通道: ai_session:stop, myid: {session_id}")
+            else:
+                logger.error("Redis连接不可用，无法发送会话停止通知")
+        except Exception as e:
+            logger.error(f"发送会话停止通知失败: {str(e)}")
+            # 通知发送失败不影响会话停止流程
+        
         logger.info(f"会话 {session_id} 已停止")
         
         return {
